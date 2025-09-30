@@ -1,6 +1,7 @@
 use chrono::Utc;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::env;
 
 use crate::agents::extension::ExtensionInfo;
 use crate::agents::router_tools::llm_search_tool_prompt;
@@ -45,7 +46,21 @@ impl PromptManager {
     }
 
     /// Map model (normalized) to prompt filenames; returns filename if a key is contained in the normalized model
+    /// 
+    /// Environment variable GOOSE_SYSTEM_PROMPT can be used to override:
+    /// - "default" or unset: uses system.md (or model-specific prompt)
+    /// - "v2": uses system_v2.md
     fn model_prompt_map(model: &str) -> &'static str {
+        // Check environment variable for system prompt override
+        let system_prompt_version = env::var("GOOSE_SYSTEM_PROMPT")
+            .unwrap_or_else(|_| "default".to_string());
+        
+        // If v2 is requested, return system_v2.md immediately
+        if system_prompt_version == "v2" {
+            return "system_v2.md";
+        }
+        
+        // Otherwise, use the model-specific mapping or default
         let mut map = HashMap::new();
         map.insert("gpt_4_1", "system_gpt_4.1.md");
         // Add more mappings as needed
@@ -167,9 +182,26 @@ impl PromptManager {
         }
     }
 
+    /// Get the recipe prompt based on environment variable
+    /// 
+    /// Environment variable GOOSE_RECIPE_PROMPT can be used to select:
+    /// - "default" or unset: uses recipe.md
+    /// - "code_tasks": uses recipe_code_tasks.md
     pub async fn get_recipe_prompt(&self) -> String {
         let context: HashMap<&str, Value> = HashMap::new();
-        prompt_template::render_global_file("recipe.md", &context).expect("Prompt should render")
+        
+        // Check environment variable for recipe prompt override
+        let recipe_prompt_version = env::var("GOOSE_RECIPE_PROMPT")
+            .unwrap_or_else(|_| "default".to_string());
+        
+        // Select the appropriate recipe prompt file
+        let prompt_file = match recipe_prompt_version.as_str() {
+            "code_tasks" => "recipe_code_tasks.md",
+            _ => "recipe.md", // Default to recipe.md
+        };
+        
+        prompt_template::render_global_file(prompt_file, &context)
+            .expect("Prompt should render")
     }
 }
 
