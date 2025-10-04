@@ -7,6 +7,7 @@ use crate::commands::acp::run_acp_agent;
 use crate::commands::bench::agent_generator;
 use crate::commands::configure::handle_configure;
 use crate::commands::info::handle_info;
+use crate::commands::metrics::handle_metrics;
 use crate::commands::project::{handle_project_default, handle_projects_interactive};
 use crate::commands::recipe::{handle_deeplink, handle_list, handle_validate};
 // Import the new handlers from commands::schedule
@@ -307,6 +308,10 @@ enum RecipeCommand {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Check the value of goose-related environment variables
+    #[command(about = "Check the value of goose-related environment variables")]
+    CheckEnv {},
+
     /// Configure goose settings
     #[command(about = "Configure goose settings")]
     Configure {},
@@ -317,6 +322,22 @@ enum Command {
         /// Show verbose information including current configuration
         #[arg(short, long, help = "Show verbose information including config.yaml")]
         verbose: bool,
+    },
+
+    /// Analyze session metrics
+    #[command(about = "Analyze session metrics from the session database")]
+    Metrics {
+        /// Session ID or name to analyze (analyzes latest if not provided)
+        #[arg(long, help = "Session ID or name to analyze")]
+        session: Option<String>,
+
+        /// Show detailed metrics
+        #[arg(long, help = "Show detailed metrics")]
+        detailed: bool,
+
+        /// Export metrics to JSON format
+        #[arg(long, help = "Export metrics to JSON format")]
+        export_json: bool,
     },
 
     /// Manage system prompts and behaviors
@@ -746,8 +767,10 @@ pub async fn cli() -> Result<()> {
     }
 
     let command_name = match &cli.command {
+        Some(Command::CheckEnv { .. }) => "check-env",
         Some(Command::Configure {}) => "configure",
         Some(Command::Info { .. }) => "info",
+        Some(Command::Metrics { .. }) => "metrics",
         Some(Command::Mcp { .. }) => "mcp",
         Some(Command::Acp {}) => "acp",
         Some(Command::Session { .. }) => "session",
@@ -769,12 +792,30 @@ pub async fn cli() -> Result<()> {
     );
 
     match cli.command {
+        Some(Command::CheckEnv {}) => {
+            let prompt_version = std::env::var("GOOSE_SYSTEM_PROMPT")
+                .unwrap_or_else(|_| "Not Set (will use default)".to_string());
+            let subagent_prompt_version = std::env::var("GOOSE_SUBAGENT_SYSTEM_PROMPT")
+                .unwrap_or_else(|_| "Not Set (will use default)".to_string());
+            
+            println!("GOOSE_SYSTEM_PROMPT: {}", prompt_version);
+            println!("GOOSE_SUBAGENT_SYSTEM_PROMPT: {}", subagent_prompt_version);
+            return Ok(());
+        }
         Some(Command::Configure {}) => {
             let _ = handle_configure().await;
             return Ok(());
         }
         Some(Command::Info { verbose }) => {
             handle_info(verbose)?;
+            return Ok(());
+        }
+        Some(Command::Metrics {
+            session,
+            detailed,
+            export_json,
+        }) => {
+            handle_metrics(session, detailed, export_json).await?;
             return Ok(());
         }
         Some(Command::Mcp { name }) => {

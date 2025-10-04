@@ -2,6 +2,7 @@ pub mod acp;
 pub mod bench;
 pub mod configure;
 pub mod info;
+pub mod metrics;
 pub mod project;
 pub mod recipe;
 pub mod schedule;

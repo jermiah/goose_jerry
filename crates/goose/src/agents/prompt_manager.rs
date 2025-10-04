@@ -2,6 +2,7 @@ use chrono::Utc;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::env;
+use tracing::info;
 
 use crate::agents::extension::ExtensionInfo;
 use crate::agents::router_tools::llm_search_tool_prompt;
@@ -57,6 +58,7 @@ impl PromptManager {
         
         // If v2 is requested, return system_v2.md immediately
         if system_prompt_version == "v2" {
+            info!("🦆 Using system prompt: system_v2.md (GOOSE_SYSTEM_PROMPT=v2)");
             return "system_v2.md";
         }
         
@@ -67,9 +69,11 @@ impl PromptManager {
         let norm_model = Self::normalize_model_name(model);
         for (key, val) in &map {
             if norm_model.contains(key) {
+                info!(" Using system prompt: {} (model-specific for {})", val, model);
                 return val;
             }
         }
+        info!(" Using system prompt: system.md (default)");
         "system.md"
     }
 
@@ -77,6 +81,7 @@ impl PromptManager {
     ///
     /// * `extensions_info` – extension information for each extension/MCP
     /// * `frontend_instructions` – instructions for the "frontend" tool
+    /// * `model_capability_warning` – optional warning about model capabilities
     pub fn build_system_prompt(
         &self,
         extensions_info: Vec<ExtensionInfo>,
@@ -84,6 +89,7 @@ impl PromptManager {
         suggest_disable_extensions_prompt: Value,
         model_name: Option<&str>,
         router_enabled: bool,
+        model_capability_warning: Option<bool>,
     ) -> String {
         let mut context: HashMap<&str, Value> = HashMap::new();
         let mut extensions_info = extensions_info.clone();
@@ -131,6 +137,14 @@ impl PromptManager {
         // First check the global store, and only if it's not available, fall back to the provided model_name
         let model_to_use: Option<String> =
             get_current_model().or_else(|| model_name.map(|s| s.to_string()));
+        
+        // Add model capability warning if present
+        if let Some(true) = model_capability_warning {
+            context.insert("model_capability_warning", Value::Bool(true));
+            if let Some(model) = &model_to_use {
+                context.insert("model_name", Value::String(model.clone()));
+            }
+        }
 
         // Conditionally load the override prompt or the global system prompt
         let base_prompt = if let Some(override_prompt) = &self.system_prompt_override {
@@ -268,7 +282,7 @@ mod tests {
         manager.set_system_prompt_override(malicious_override.to_string());
 
         let result =
-            manager.build_system_prompt(vec![], None, Value::String("".to_string()), None, false);
+            manager.build_system_prompt(vec![], None, Value::String("".to_string()), None, false, None);
 
         assert!(!result.contains('\u{E0041}'));
         assert!(!result.contains('\u{E0042}'));
@@ -284,7 +298,7 @@ mod tests {
         manager.add_system_prompt_extra(malicious_extra.to_string());
 
         let result =
-            manager.build_system_prompt(vec![], None, Value::String("".to_string()), None, false);
+            manager.build_system_prompt(vec![], None, Value::String("".to_string()), None, false, None);
 
         assert!(!result.contains('\u{E0041}'));
         assert!(!result.contains('\u{E0042}'));
@@ -301,7 +315,7 @@ mod tests {
         manager.add_system_prompt_extra("Third\u{E0043}instruction".to_string());
 
         let result =
-            manager.build_system_prompt(vec![], None, Value::String("".to_string()), None, false);
+            manager.build_system_prompt(vec![], None, Value::String("".to_string()), None, false, None);
 
         assert!(!result.contains('\u{E0041}'));
         assert!(!result.contains('\u{E0042}'));
@@ -318,7 +332,7 @@ mod tests {
         manager.add_system_prompt_extra(legitimate_unicode.to_string());
 
         let result =
-            manager.build_system_prompt(vec![], None, Value::String("".to_string()), None, false);
+            manager.build_system_prompt(vec![], None, Value::String("".to_string()), None, false, None);
 
         assert!(result.contains("世界"));
         assert!(result.contains("🌍"));
@@ -341,6 +355,7 @@ mod tests {
             Value::String("".to_string()),
             None,
             false,
+            None,
         );
 
         assert!(!result.contains('\u{E0041}'));

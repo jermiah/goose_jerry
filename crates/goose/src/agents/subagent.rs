@@ -282,6 +282,9 @@ impl SubAgent {
     }
 
     /// Build the system prompt for the subagent using the template
+    /// Environment variable GOOSE_SUBAGENT_SYSTEM_PROMPT can be used to override:
+    /// - "default" or unset: uses subagent_system.md
+    /// - "v2": uses subagent_systemv2.md
     async fn build_system_prompt(&self, available_tools: &[Tool]) -> Result<String, anyhow::Error> {
         let mut context = HashMap::new();
 
@@ -327,8 +330,20 @@ impl SubAgent {
             serde_json::Value::Number(serde_json::Number::from(available_tools.len())),
         );
 
+        // Check environment variable for subagent system prompt override
+        let subagent_prompt_version = std::env::var("GOOSE_SUBAGENT_SYSTEM_PROMPT")
+            .unwrap_or_else(|_| "default".to_string());
+        
+        let prompt_file = if subagent_prompt_version == "v2" {
+            debug!("🦆 Using subagent system prompt: subagent_systemv2.md (GOOSE_SUBAGENT_SYSTEM_PROMPT=v2)");
+            "subagent_systemv2.md"
+        } else {
+            debug!("🦆 Using subagent system prompt: subagent_system.md (default)");
+            "subagent_system.md"
+        };
+
         // Render the subagent system prompt template
-        let system_prompt = render_global_file("subagent_system.md", &context)
+        let system_prompt = render_global_file(prompt_file, &context)
             .map_err(|e| anyhow!("Failed to render subagent system prompt: {}", e))?;
 
         Ok(system_prompt)

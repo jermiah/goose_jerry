@@ -38,7 +38,7 @@ fi
 
 
 # --- 2) Variables ---
-REPO="block/goose"
+REPO="jermaih/goose_jerry"
 OUT_FILE="goose"
 GOOSE_BIN_DIR="${GOOSE_BIN_DIR:-"$HOME/.local/bin"}"
 RELEASE="${CANARY:-false}"

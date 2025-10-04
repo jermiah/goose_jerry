@@ -1,0 +1,9 @@
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/DEFAULTLIB:Advapi32.lib"]
+
+[build]
+jobs = 8
+
+[net]
+git-fetch-with-cli = true
+retry = 3

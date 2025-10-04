@@ -68,6 +68,7 @@ impl Agent {
                 .await,
             Some(model_name),
             router_enabled,
+            None, // No model capability warning in normal operation
         );
 
         // Handle toolshim if enabled

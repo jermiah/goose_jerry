@@ -4,7 +4,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use utoipa::ToSchema;
 
 /// Extension data containing all extension states
@@ -92,6 +92,43 @@ impl TodoState {
     /// Create a new TODO state
     pub fn new(content: String) -> Self {
         Self { content }
+    }
+}
+
+/// File tracking state for metrics
+/// Tracks which files have been created in the current session
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FileTrackingState {
+    /// Set of file paths that have been created in this session
+    pub created_files: HashSet<String>,
+}
+
+impl ExtensionState for FileTrackingState {
+    const EXTENSION_NAME: &'static str = "file_tracking";
+    const VERSION: &'static str = "v0";
+}
+
+impl FileTrackingState {
+    /// Create a new file tracking state
+    pub fn new() -> Self {
+        Self {
+            created_files: HashSet::new(),
+        }
+    }
+
+    /// Check if a file has been created in this session
+    pub fn is_file_created(&self, file_path: &str) -> bool {
+        self.created_files.contains(file_path)
+    }
+
+    /// Mark a file as created in this session
+    pub fn mark_file_created(&mut self, file_path: String) {
+        self.created_files.insert(file_path);
+    }
+
+    /// Get the number of created files
+    pub fn created_files_count(&self) -> usize {
+        self.created_files.len()
     }
 }
 

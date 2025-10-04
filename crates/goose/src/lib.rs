@@ -6,6 +6,7 @@ pub mod execution;
 pub mod logging;
 pub mod mcp_utils;
 pub mod model;
+pub mod model_capabilities;
 pub mod oauth;
 pub mod permission;
 pub mod prompt_template;

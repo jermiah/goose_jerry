@@ -203,7 +203,7 @@ pub async fn build_session(session_config: SessionBuilderConfig) -> CliSession {
         agent.add_final_output_tool(final_output_response).await;
     }
 
-    let new_provider = match create(&provider_name, model_config) {
+    let new_provider = match create(&provider_name, model_config.clone()) {
         Ok(provider) => provider,
         Err(e) => {
             output::render_error(&format!(
@@ -216,6 +216,51 @@ pub async fn build_session(session_config: SessionBuilderConfig) -> CliSession {
             process::exit(1);
         }
     };
+    
+    // Validate model capabilities
+    let validation_result = goose::model_capabilities::validate_model(&model_name, &provider_name);
+    
+    if validation_result.should_warn() && session_config.interactive {
+        // Display capability warnings
+        println!("\n{}", style("⚠️  MODEL CAPABILITY CHECK").yellow().bold());
+        println!("{}", validation_result.get_display_message());
+        
+        if !validation_result.is_compatible {
+            // Model is known to be incompatible
+            let should_proceed = match cliclack::confirm(
+                "This model may not work correctly with Goose. Do you want to proceed anyway?"
+            )
+            .initial_value(false)
+            .interact()
+            {
+                Ok(choice) => choice,
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::Interrupted {
+                        process::exit(0);
+                    } else {
+                        output::render_error(&format!("Failed to get user input: {}", e));
+                        process::exit(1);
+                    }
+                }
+            };
+            
+            if !should_proceed {
+                println!("{}", style("Session cancelled. Please configure a compatible model.").yellow());
+                println!("Run: goose configure");
+                process::exit(0);
+            }
+        } else {
+            // Model capability is unknown - just warn
+            println!("{}", style("\nℹ️  Proceeding with unknown model. If you encounter issues, try a known compatible model.").cyan());
+        }
+    } else if validation_result.should_warn() && !session_config.interactive {
+        // Non-interactive mode - just log warnings
+        tracing::warn!("Model capability check: {}", validation_result.get_display_message());
+        if !validation_result.is_compatible {
+            tracing::error!("Model '{}' is not compatible with Goose. Session may fail.", model_name);
+        }
+    }
+    
     // Keep a reference to the provider for display_session_info
     let provider_for_display = Arc::clone(&new_provider);
 

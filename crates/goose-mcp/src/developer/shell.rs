@@ -1,3 +1,4 @@
+#[allow(unused_imports)]
 use goose::config::get_config_dir;
 use std::{env, ffi::OsString, process::Stdio};
 

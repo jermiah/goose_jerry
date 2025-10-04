@@ -445,6 +445,71 @@ impl Agent {
         }
 
         debug!("WAITING_TOOL_START: {}", tool_call.name);
+        
+        // Classify the tool operation using tool_classifier
+        use crate::session::tool_classifier::{classify_tool, ToolOperation};
+        
+        let classified = classify_tool(&tool_call.name, &tool_call.arguments);
+        
+        // Convert operation type to string
+        let operation_type = match classified.operation {
+            ToolOperation::FileCreate => Some("file_create"),
+            ToolOperation::FileEdit => Some("file_edit"),
+            ToolOperation::FileRead => Some("file_read"),
+            ToolOperation::FileDelete => Some("file_delete"),
+            ToolOperation::CommandExecute => Some("command_execute"),
+            ToolOperation::Search => Some("search"),
+            ToolOperation::Navigate => Some("navigate"),
+            ToolOperation::Other(_) => None,
+        };
+        
+        // Get the file path from classified metadata
+        let file_path = classified.metadata.file_path.clone();
+        
+        // If this is a file creation operation, update the file tracking state
+        if let (Some("file_create"), Some(path)) = (&operation_type, &file_path) {
+            if let Some(session_config) = session {
+                // Try to get the file tracking state
+                if let Ok(session_data) = SessionManager::get_session(&session_config.id, false).await {
+                    // Get or create file tracking state
+                    let mut file_tracking = crate::session::extension_data::FileTrackingState::from_extension_data(&session_data.extension_data)
+                        .unwrap_or_else(crate::session::extension_data::FileTrackingState::new);
+                    
+                    // Mark the file as created
+                    file_tracking.mark_file_created(path.to_string());
+                    
+                    // Save the updated state
+                    let mut extension_data = session_data.extension_data.clone();
+                    if let Err(e) = file_tracking.to_extension_data(&mut extension_data) {
+                        warn!("Failed to update file tracking state: {}", e);
+                    } else {
+                        // Update the session with the new extension data
+                        if let Err(e) = SessionManager::update_session(&session_config.id)
+                            .extension_data(extension_data)
+                            .apply()
+                            .await
+                        {
+                            warn!("Failed to save file tracking state: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Record tool start for metrics tracking with operation metadata
+        let event_id = if let Some(session_config) = session {
+            SessionManager::record_tool_start(
+                &session_config.id, 
+                &tool_call.name,
+                operation_type,
+                file_path.as_deref()
+            )
+            .await
+            .ok()
+        } else {
+            None
+        };
+        
         let result: ToolCallResult = if self
             .sub_recipe_manager
             .lock()
@@ -633,6 +698,32 @@ impl Agent {
         };
 
         debug!("WAITING_TOOL_END: {}", tool_call.name);
+        
+        // Record tool completion for metrics tracking
+        if let Some(id) = event_id {
+            // We need to check the result to determine status
+            // Since result.result is a Future, we'll record completion after it resolves
+            // For now, we'll wrap the future to record completion when it completes
+            let result_future = result.result;
+            let wrapped_future = async move {
+                let outcome = result_future.await;
+                let status = if outcome.is_ok() { "success" } else { "error" };
+                let error_msg = outcome.as_ref().err().map(|e| e.message.clone());
+                let _ = SessionManager::record_tool_complete(id, status, error_msg.as_deref()).await;
+                outcome
+            };
+            
+            return (
+                request_id,
+                Ok(ToolCallResult {
+                    notification_stream: result.notification_stream,
+                    result: Box::new(Box::pin(
+                        wrapped_future
+                            .map(super::large_response_handler::process_tool_response),
+                    )),
+                }),
+            );
+        }
 
         (
             request_id,
@@ -1534,6 +1625,7 @@ impl Agent {
                 .await,
             Some(model_name),
             false,
+            None, // No model capability warning in recipe creation
         );
         tracing::debug!(
             "Built system prompt with {} characters",
@@ -1747,7 +1839,7 @@ mod tests {
 
         let prompt_manager = agent.prompt_manager.lock().await;
         let system_prompt =
-            prompt_manager.build_system_prompt(vec![], None, Value::Null, None, false);
+            prompt_manager.build_system_prompt(vec![], None, Value::Null, None, false, None);
 
         let final_output_tool_ref = agent.final_output_tool.lock().await;
         let final_output_tool_system_prompt =

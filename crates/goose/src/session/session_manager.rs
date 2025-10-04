@@ -17,7 +17,7 @@ use tokio::sync::OnceCell;
 use tracing::{info, warn};
 use utoipa::ToSchema;
 
-const CURRENT_SCHEMA_VERSION: i32 = 1;
+const CURRENT_SCHEMA_VERSION: i32 = 3;
 
 static SESSION_STORAGE: OnceCell<Arc<SessionStorage>> = OnceCell::const_new();
 
@@ -247,6 +247,55 @@ impl SessionManager {
             Ok(())
         }
     }
+
+    /// Record the start of a tool execution with operation metadata
+    pub async fn record_tool_start(
+        session_id: &str,
+        tool_name: &str,
+        operation_type: Option<&str>,
+        file_path: Option<&str>,
+    ) -> Result<i64> {
+        Self::instance()
+            .await?
+            .record_tool_start(session_id, tool_name, operation_type, file_path)
+            .await
+    }
+
+    /// Record the completion of a tool execution
+    pub async fn record_tool_complete(
+        event_id: i64,
+        status: &str,
+        error_message: Option<&str>,
+    ) -> Result<()> {
+        Self::instance()
+            .await?
+            .record_tool_complete(event_id, status, error_message)
+            .await
+    }
+
+    /// Get tool usage statistics for a session
+    pub async fn get_tool_stats(session_id: &str) -> Result<ToolStats> {
+        Self::instance().await?.get_tool_stats(session_id).await
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolStats {
+    pub total_calls: usize,
+    pub successful_calls: usize,
+    pub failed_calls: usize,
+    pub cancelled_calls: usize,
+    pub avg_duration_ms: f64,
+    pub calls_by_tool: std::collections::HashMap<String, usize>,
+    pub calls_by_operation: std::collections::HashMap<String, usize>,
+    pub file_operations: Vec<FileOperation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileOperation {
+    pub file_path: String,
+    pub operation_type: String,
+    pub timestamp: String,
 }
 
 pub struct SessionStorage {
@@ -597,6 +646,65 @@ impl SessionStorage {
                 .execute(&self.pool)
                 .await?;
             }
+            2 => {
+                // Create tool_events table for tracking tool usage
+                sqlx::query(
+                    r#"
+                    CREATE TABLE tool_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id TEXT NOT NULL,
+                        tool_name TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        error_message TEXT,
+                        started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        completed_at TIMESTAMP,
+                        duration_ms INTEGER,
+                        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                    )
+                "#,
+                )
+                .execute(&self.pool)
+                .await?;
+
+                // Create indexes for efficient querying
+                sqlx::query("CREATE INDEX idx_tool_events_session ON tool_events(session_id)")
+                    .execute(&self.pool)
+                    .await?;
+                sqlx::query("CREATE INDEX idx_tool_events_tool_name ON tool_events(tool_name)")
+                    .execute(&self.pool)
+                    .await?;
+                sqlx::query("CREATE INDEX idx_tool_events_status ON tool_events(status)")
+                    .execute(&self.pool)
+                    .await?;
+            }
+            3 => {
+                // Add operation_type and file_path columns to tool_events for better metrics tracking
+                sqlx::query(
+                    r#"
+                    ALTER TABLE tool_events ADD COLUMN operation_type TEXT
+                "#,
+                )
+                .execute(&self.pool)
+                .await?;
+
+                sqlx::query(
+                    r#"
+                    ALTER TABLE tool_events ADD COLUMN file_path TEXT
+                "#,
+                )
+                .execute(&self.pool)
+                .await?;
+
+                // Create index for operation_type for efficient querying
+                sqlx::query("CREATE INDEX idx_tool_events_operation ON tool_events(operation_type)")
+                    .execute(&self.pool)
+                    .await?;
+                
+                // Create index for file_path for efficient querying
+                sqlx::query("CREATE INDEX idx_tool_events_file_path ON tool_events(file_path)")
+                    .execute(&self.pool)
+                    .await?;
+            }
             _ => {
                 anyhow::bail!("Unknown migration version: {}", version);
             }
@@ -855,6 +963,156 @@ impl SessionStorage {
         Ok(SessionInsights {
             total_sessions: row.0 as usize,
             total_tokens: row.1.unwrap_or(0),
+        })
+    }
+
+    /// Record the start of a tool execution with operation metadata
+    async fn record_tool_start(
+        &self,
+        session_id: &str,
+        tool_name: &str,
+        operation_type: Option<&str>,
+        file_path: Option<&str>,
+    ) -> Result<i64> {
+        let result = sqlx::query(
+            r#"
+            INSERT INTO tool_events (session_id, tool_name, status, operation_type, file_path)
+            VALUES (?, ?, 'running', ?, ?)
+            "#,
+        )
+        .bind(session_id)
+        .bind(tool_name)
+        .bind(operation_type)
+        .bind(file_path)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.last_insert_rowid())
+    }
+
+    /// Record the completion of a tool execution
+    async fn record_tool_complete(
+        &self,
+        event_id: i64,
+        status: &str,
+        error_message: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE tool_events
+            SET status = ?,
+                error_message = ?,
+                completed_at = datetime('now'),
+                duration_ms = CAST((julianday(datetime('now')) - julianday(started_at)) * 86400000 AS INTEGER)
+            WHERE id = ?
+            "#,
+        )
+        .bind(status)
+        .bind(error_message)
+        .bind(event_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Get tool usage statistics for a session
+    async fn get_tool_stats(&self, session_id: &str) -> Result<ToolStats> {
+        // Get overall counts
+        let counts = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+            r#"
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successful,
+                SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as failed,
+                SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) as cancelled
+            FROM tool_events
+            WHERE session_id = ?
+            "#,
+        )
+        .bind(session_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        // Get average duration (only for completed tools)
+        let avg_duration: Option<f64> = sqlx::query_scalar(
+            r#"
+            SELECT AVG(duration_ms)
+            FROM tool_events
+            WHERE session_id = ? AND duration_ms IS NOT NULL
+            "#,
+        )
+        .bind(session_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        // Get counts by tool name
+        let tool_counts = sqlx::query_as::<_, (String, i64)>(
+            r#"
+            SELECT tool_name, COUNT(*) as count
+            FROM tool_events
+            WHERE session_id = ?
+            GROUP BY tool_name
+            "#,
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut calls_by_tool = std::collections::HashMap::new();
+        for (tool_name, count) in tool_counts {
+            calls_by_tool.insert(tool_name, count as usize);
+        }
+
+        // Get counts by operation type
+        let operation_counts = sqlx::query_as::<_, (String, i64)>(
+            r#"
+            SELECT operation_type, COUNT(*) as count
+            FROM tool_events
+            WHERE session_id = ? AND operation_type IS NOT NULL
+            GROUP BY operation_type
+            "#,
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut calls_by_operation = std::collections::HashMap::new();
+        for (operation_type, count) in operation_counts {
+            calls_by_operation.insert(operation_type, count as usize);
+        }
+
+        // Get file operations with timestamps
+        let file_ops = sqlx::query_as::<_, (String, String, String)>(
+            r#"
+            SELECT file_path, operation_type, started_at
+            FROM tool_events
+            WHERE session_id = ? AND file_path IS NOT NULL AND operation_type IS NOT NULL
+            ORDER BY started_at
+            "#,
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let file_operations = file_ops
+            .into_iter()
+            .map(|(file_path, operation_type, timestamp)| FileOperation {
+                file_path,
+                operation_type,
+                timestamp,
+            })
+            .collect();
+
+        Ok(ToolStats {
+            total_calls: counts.0 as usize,
+            successful_calls: counts.1 as usize,
+            failed_calls: counts.2 as usize,
+            cancelled_calls: counts.3 as usize,
+            avg_duration_ms: avg_duration.unwrap_or(0.0),
+            calls_by_tool,
+            calls_by_operation,
+            file_operations,
         })
     }
 }
